@@ -13,40 +13,49 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Persistencia: Supabase en la nube, JSON local como fallback ───────────────
+# ── Persistencia: Supabase REST API / JSON local como fallback ────────────────
+import requests as _req
 CFILE = "collection.json"
 
 @st.cache_resource
-def get_supabase():
-    """Devuelve el cliente de Supabase si hay credenciales, o None."""
+def _sb_cfg():
+    """Devuelve (url, headers) de Supabase o (None, None) si no hay secrets."""
     try:
-        from supabase import create_client
-        url = st.secrets["SUPABASE_URL"]
+        url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/collection"
         key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
+        hdrs = {
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "resolution=merge-duplicates,return=minimal",
+        }
+        return url, hdrs
     except Exception:
-        return None
+        return None, None
 
 def load_col() -> dict:
-    sb = get_supabase()
-    if sb is not None:
-        result = sb.table("collection").select("sticker_id,count").execute()
-        return {r["sticker_id"]: r["count"] for r in result.data}
-    # Fallback local
+    url, hdrs = _sb_cfg()
+    if url:
+        r = _req.get(url + "?select=sticker_id,count", headers=hdrs, timeout=10)
+        if r.ok:
+            return {row["sticker_id"]: row["count"] for row in r.json()}
     if os.path.exists(CFILE):
         with open(CFILE, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 def save_col(col: dict):
-    sb = get_supabase()
-    if sb is not None:
+    url, hdrs = _sb_cfg()
+    if url:
+        # Upsert fichas con count > 0
         to_upsert = [{"sticker_id": k, "count": v} for k, v in col.items() if v > 0]
-        to_delete  = [k for k, v in col.items() if v == 0]
         if to_upsert:
-            sb.table("collection").upsert(to_upsert, on_conflict="sticker_id").execute()
-        for i in range(0, len(to_delete), 100):
-            sb.table("collection").delete().in_("sticker_id", to_delete[i:i+100]).execute()
+            _req.post(url, json=to_upsert, headers=hdrs, timeout=10)
+        # Borrar fichas que volvieron a 0
+        to_del = [k for k, v in col.items() if v == 0]
+        for i in range(0, len(to_del), 80):
+            chunk = ",".join(to_del[i:i+80])
+            _req.delete(url + f"?sticker_id=in.({chunk})", headers=hdrs, timeout=10)
     else:
         with open(CFILE, "w", encoding="utf-8") as f:
             json.dump(col, f, indent=2, ensure_ascii=False)
