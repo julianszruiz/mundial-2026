@@ -36,9 +36,17 @@ def _sb_cfg():
 def load_col() -> dict:
     url, hdrs = _sb_cfg()
     if url:
-        r = _req.get(url + "?select=sticker_id,count", headers=hdrs, timeout=10)
-        if r.ok:
-            return {row["sticker_id"]: row["count"] for row in r.json()}
+        try:
+            r = _req.get(url + "?select=sticker_id,count", headers=hdrs, timeout=10)
+            if r.ok:
+                st.session_state["_sb_status"] = "ok"
+                return {row["sticker_id"]: row["count"] for row in r.json()}
+            else:
+                st.session_state["_sb_status"] = f"ERROR {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            st.session_state["_sb_status"] = f"EXCEPTION: {e}"
+    else:
+        st.session_state["_sb_status"] = "sin secrets"
     if os.path.exists(CFILE):
         with open(CFILE, encoding="utf-8") as f:
             return json.load(f)
@@ -47,15 +55,17 @@ def load_col() -> dict:
 def save_col(col: dict):
     url, hdrs = _sb_cfg()
     if url:
-        # Upsert fichas con count > 0
         to_upsert = [{"sticker_id": k, "count": v} for k, v in col.items() if v > 0]
         if to_upsert:
-            _req.post(url, json=to_upsert, headers=hdrs, timeout=10)
-        # Borrar fichas que volvieron a 0
+            r = _req.post(url, json=to_upsert, headers=hdrs, timeout=10)
+            if not r.ok:
+                st.session_state["_sb_status"] = f"SAVE ERROR {r.status_code}: {r.text[:200]}"
+                return
         to_del = [k for k, v in col.items() if v == 0]
         for i in range(0, len(to_del), 80):
             chunk = ",".join(to_del[i:i+80])
             _req.delete(url + f"?sticker_id=in.({chunk})", headers=hdrs, timeout=10)
+        st.session_state["_sb_status"] = "ok"
     else:
         with open(CFILE, "w", encoding="utf-8") as f:
             json.dump(col, f, indent=2, ensure_ascii=False)
@@ -66,6 +76,8 @@ if "col" not in st.session_state:
 col = st.session_state.col
 
 def on_change_count(sid: str):
+    if "col" not in st.session_state:
+        st.session_state.col = load_col()
     val = st.session_state.get(f"n_{sid}", 0)
     st.session_state.col[sid] = int(val)
     save_col(st.session_state.col)
@@ -211,6 +223,11 @@ with st.sidebar:
     page = st.radio("Navegar", ["🏠 Inicio", "📖 Álbum", "🔄 Repetidas", "❓ Faltan"],
                     label_visibility="collapsed")
     st.markdown("---")
+    sb_status = st.session_state.get("_sb_status", "cargando...")
+    if sb_status == "ok":
+        st.success("☁️ Supabase conectado")
+    else:
+        st.error(f"⚠️ DB: {sb_status}")
     st.caption("Panini FIFA World Cup 2026™\n980 fichas · 48 selecciones")
 
 # ══════════════════════════════════════════════════════════════════════════════
